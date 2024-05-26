@@ -36,7 +36,7 @@ OUTPUT:
   INFERENCE_DIR: './logs/inference'
 
 TEST:
-  CKPT_FILE_SG: './'
-  CKPT_FILE_TG: './'
+  CKPT_FILE_SG: './logs/ckpts/Wildtrack_sequence1_SG_epoch92_train90.pth'
+  CKPT_FILE_TG: './logs/ckpts/Wildtrack_sequence1_TG_epoch72_train90.pth'
   FRAME_START: 360
   EDGE_THRESH: 0.9

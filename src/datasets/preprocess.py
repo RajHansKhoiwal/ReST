@@ -7,8 +7,15 @@ import cv2
 import tqdm
 from tqdm import trange
 import argparse
+import torch
+from pathlib import Path  # for reading images recursively
+from glob import glob  # for reading images recursively
 
 DATASET_NAME = ''
+
+# Initialize YOLOv5 model
+model = torch.hub.load('ultralytics/yolov5', 'yolov5l', pretrained=True)
+
 
 class BasePreprocess:
 
@@ -20,6 +27,7 @@ class BasePreprocess:
                  eval_ratio: float,
                  test_ratio: float,
                  valid_frames_range=None,
+                 num_of_cams=None,
                  output_dir=None,
                  image_format='jpg',
                  random_seed=202204):
@@ -31,6 +39,7 @@ class BasePreprocess:
         self.eval_ratio = eval_ratio
         self.test_ratio = test_ratio
         self.valid_frames_range = valid_frames_range
+        self.num_of_cams = num_of_cams
         self.image_format = image_format
         if output_dir is None:
             self.output_path = os.path.join(self.dataset_path, 'output')
@@ -148,29 +157,44 @@ class BasePreprocess:
         n = len(frames_id)
         n_test = int(self.test_ratio * n)
         test_frames_id = frames_id[-n_test+1:]
-        attr = ['frame', 'id', 'bb_left', 'bb_top', 'bb_width', 'bb_height', 'x', 'y', 'z']
+        attr = ['frame', 'id', 'bb_left', 'bb_top',
+                'bb_width', 'bb_height', 'x', 'y', 'z']
         gts = []
         for _ in range(len(self.annots_name)):
             gts.append(pd.DataFrame(columns=attr))
         for f in tqdm.tqdm(test_frames_id):
             for det in self.frames[f]:
                 cID = det[5]
-                frame_style = {'Wildtrack': f'0000{f*5:04d}', 'PETS09': f'{f:03d}', 'CAMPUS': f'{f:04d}', 'CityFlow': f'{f}'}
+                frame_style = {'Wildtrack': f'0000{f*5:04d}',
+                               'PETS09': f'{f:03d}', 'CAMPUS': f'{f:04d}', 'CityFlow': f'{f}'}
                 frame = frame_style[DATASET_NAME]
                 gts[cID] = gts[cID].append({
-                                            'frame': frame,
-                                            'id': det[4],
-                                            'bb_left': det[0],
-                                            'bb_top': det[1],
-                                            'bb_width': det[2],
-                                            'bb_height': det[3],
-                                            'x': 1, 'y': 1, 'z':1
-                                        }, ignore_index=True)
+                    'frame': frame,
+                    'id': det[4],
+                    'bb_left': det[0],
+                    'bb_top': det[1],
+                    'bb_width': det[2],
+                    'bb_height': det[3],
+                    'x': 1, 'y': 1, 'z': 1
+                }, ignore_index=True)
         for c in range(len(self.annots_name)):
-            gts[c].to_csv(os.path.join(gt_path, f'c{c}.txt'), header=None, index=None, sep=',')
+            gts[c].to_csv(os.path.join(
+                gt_path, f'c{c}.txt'), header=None, index=None, sep=',')
 
 
 class WildtrackPreprocess(BasePreprocess):
+
+    # Define a function to perform object detection using YOLOv5
+    def perform_object_detection(self, img):
+        results = model(img)  # Perform object detection using YOLOv5
+        # Convert detections to numpy array
+        detections = results.xyxy[0].cpu().numpy()
+
+        # Filter out detections for the "person" class
+        # Person class is class ID 0
+        person_detections = detections[detections[:, 5] == 0]
+
+        return person_detections
 
     def load_annotations(self):
         """
@@ -178,23 +202,51 @@ class WildtrackPreprocess(BasePreprocess):
         Within data format:
             [frame_id]: (top_left_x, top_left_y, width, height, track_id, camera_id)
         """
-        for frame_id in range(self.valid_frames_range[-1]):
-            anno_file = f'{self.base_dir}/{self.dataset_name}/src/annotations_positions/0000{frame_id*5:04d}.json'
-            f = open(anno_file)
-            data = json.load(f)
-            f.close()
-            for raw in data:
-                track_id = raw['personID']
-                for cam_id in range(len(raw['views'])):
-                    if raw['views'][cam_id]['xmin'] == -1:
-                        continue
-                    x_min = max(raw['views'][cam_id]['xmin'], 0) # prevent negative value
-                    y_min = max(raw['views'][cam_id]['ymin'], 0) # prevent negative value
-                    width = raw['views'][cam_id]['xmax'] - x_min
-                    height = raw['views'][cam_id]['ymax'] - y_min
-                    self.frames.setdefault(frame_id, []).append(
-                        (x_min, y_min, width, height, track_id, cam_id)
-                    )
+        # for frame_id in range(self.valid_frames_range[-1]):
+        #     anno_file = f'{self.base_dir}/{self.dataset_name}/src/annotations_positions/0000{frame_id*5:04d}.json'
+        #     f = open(anno_file)
+        #     data = json.load(f)
+        #     f.close()
+        #     for raw in data:
+        #         track_id = raw['personID']
+        #         for cam_id in range(len(raw['views'])):
+        #             if raw['views'][cam_id]['xmin'] == -1:
+        #                 continue
+        #             x_min = max(raw['views'][cam_id]['xmin'], 0) # prevent negative value
+        #             y_min = max(raw['views'][cam_id]['ymin'], 0) # prevent negative value
+        #             width = raw['views'][cam_id]['xmax'] - x_min
+        #             height = raw['views'][cam_id]['ymax'] - y_min
+        #             self.frames.setdefault(frame_id, []).append(
+        #                 (x_min, y_min, width, height, track_id, cam_id)
+        #             )
+
+        for frame_id in trange(self.valid_frames_range[-1]):
+            for cam_id in range(7):
+                path = os.path.join(
+                    self.base_dir, f'{self.dataset_name}/src', 'Image_subsets', f'C{cam_id+1}')
+                img_path = os.path.join(path, f'0000{frame_id*5:04d}.png')
+
+                # Check if image file exists
+                if os.path.isfile(img_path):
+                    img = cv2.imread(img_path)  # Read image from file
+
+                    # Perform object detection using YOLOv5
+                    detections = self.perform_object_detection(img)
+
+                    # Store the detection results in the dictionary format
+                    for detection in detections:
+                        initial_id = random.randint(1, 1000)
+                        x_min, y_min, x_max, y_max, confidence, class_id = detection
+                        x_min = max(x_min, 0)  # Prevent negative values
+                        y_min = max(y_min, 0)  # Prevent negative values
+                        width = x_max - x_min
+                        height = y_max - y_min
+                        self.frames.setdefault(frame_id, []).append(
+                            (int(x_min), int(y_min), int(
+                                width), int(height), initial_id, cam_id)
+                        )
+                else:
+                    print(f"Image not found: {img_path}")
 
     def load_frames(self):
         # Copy from original dataset
@@ -202,11 +254,14 @@ class WildtrackPreprocess(BasePreprocess):
         if not os.path.exists(self.frames_output_path):
             os.mkdir(self.frames_output_path)
         for cam_id in range(7):
-            path = os.path.join(self.base_dir, f'{self.dataset_name}/src', 'Image_subsets', f'C{cam_id+1}')
+            path = os.path.join(
+                self.base_dir, f'{self.dataset_name}/src', 'Image_subsets', f'C{cam_id+1}')
             for frame_id in trange(self.valid_frames_range[-1]):
-                img = cv2.imread(os.path.join(path, f'0000{frame_id*5:04d}.png'))
+                img = cv2.imread(os.path.join(
+                    path, f'0000{frame_id*5:04d}.png'))
                 cv2.imwrite(os.path.join(self.frames_output_path,
-                                            f'{frame_id}_{cam_id}.{self.image_format}'), img)
+                                         f'{frame_id}_{cam_id}.{self.image_format}'), img)
+
 
 class CAMPUSPreprocess(BasePreprocess):
 
@@ -220,7 +275,8 @@ class CAMPUSPreprocess(BasePreprocess):
                 # Filter out the lost one.
                 if row[6] == '1':
                     continue
-                track_id, x_min, y_min, x_max, y_max, frame_id = tuple(map(int, row[:6]))
+                track_id, x_min, y_min, x_max, y_max, frame_id = tuple(
+                    map(int, row[:6]))
                 # Filter out the frame that outside the valid frames range.
                 if frame_id > self.valid_frames_range[1] or \
                    frame_id < self.valid_frames_range[0]:
@@ -229,6 +285,7 @@ class CAMPUSPreprocess(BasePreprocess):
                     (x_min, y_min, x_max - x_min, y_max - y_min, track_id, cam_id)
                 )
             fp.close()
+
 
 class CityFlowPreprocess(BasePreprocess):
 
@@ -251,22 +308,28 @@ def preprocess(dataset_dir, PreProcess, output_dir=None):
         dataset = PreProcess(
             dataset_name,
             dataset_dir,
-            [dmi['annot_fn_pattern'].format(cam_id) for cam_id in range(dmi['cam_nbr'])],
-            [dmi['video_fn_pattern'].format(cam_id) for cam_id in range(dmi['cam_nbr'])],
+            [dmi['annot_fn_pattern'].format(cam_id)
+             for cam_id in range(dmi['cam_nbr'])],
+            [dmi['video_fn_pattern'].format(cam_id)
+             for cam_id in range(dmi['cam_nbr'])],
             dmi['eval_ratio'],
             dmi['test_ratio'],
             dmi['valid_frames_range'],
+            dmi['cam_nbr'],
             output_dir=output_dir
         )
         dataset.process()
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="Wildtrack", help="pre-process which dataset", type=str)
+    parser.add_argument("--dataset", default="Wildtrack",
+                        help="pre-process which dataset", type=str)
     parser.add_argument("opts", help="Modify config options using the command-line", default=None,
                         nargs=argparse.REMAINDER)
     args = parser.parse_args()
     return args.dataset
+
 
 if __name__ == '__main__':
     DATASET_NAME = parse_args()
@@ -277,8 +340,10 @@ if __name__ == '__main__':
 
         if DATASET_NAME == 'Wildtrack':
             preprocess(dataset_dir=f'./datasets/{DATASET_NAME}', PreProcess=WildtrackPreprocess,
-                            output_dir="./datasets/Wildtrack/sequence1/output")
+                       output_dir="./datasets/Wildtrack/sequence1/output")
         elif DATASET_NAME == 'CityFlow':
-            preprocess(f'./datasets/{DATASET_NAME}', PreProcess=CityFlowPreprocess)
-        else: # CAMPUS, PETS09
-            preprocess(f'./datasets/{DATASET_NAME}', PreProcess=CAMPUSPreprocess)
+            preprocess(f'./datasets/{DATASET_NAME}',
+                       PreProcess=CityFlowPreprocess)
+        else:  # CAMPUS, PETS09
+            preprocess(f'./datasets/{DATASET_NAME}',
+                       PreProcess=CAMPUSPreprocess)

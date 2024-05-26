@@ -132,3 +132,10 @@ dmypy.json
 logs/*
 !logs/ckpts/
 !logs/inference/
+
+preprocess.sh
+train.sh
+test.sh
+deep-person-reid/*
+datasets/*
+yolov5l.pt
