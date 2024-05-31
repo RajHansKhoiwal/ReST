@@ -59,7 +59,7 @@ class BasePreprocess:
         self.load_annotations()
         self.filter_frames()
         # self.load_videos()
-        if DATASET_NAME == 'Wildtrack':
+        if DATASET_NAME == 'Wildtrack' or DATASET_NAME == 'SelfDataset':
             self.load_frames()
         self.train_test_split()
         self.load_MOTgtfile()
@@ -166,7 +166,7 @@ class BasePreprocess:
             for det in self.frames[f]:
                 cID = det[5]
                 frame_style = {'Wildtrack': f'0000{f*5:04d}',
-                               'PETS09': f'{f:03d}', 'CAMPUS': f'{f:04d}', 'CityFlow': f'{f}'}
+                               'PETS09': f'{f:03d}', 'CAMPUS': f'{f:04d}', 'CityFlow': f'{f}', 'SelfDataset': f'frame_{f}'}
                 frame = frame_style[DATASET_NAME]
                 gts[cID] = gts[cID].append({
                     'frame': frame,
@@ -261,6 +261,68 @@ class WildtrackPreprocess(BasePreprocess):
                     path, f'0000{frame_id*5:04d}.png'))
                 cv2.imwrite(os.path.join(self.frames_output_path,
                                          f'{frame_id}_{cam_id}.{self.image_format}'), img)
+                
+class SelfDatasetPreprocess(BasePreprocess):
+
+    # Define a function to perform object detection using YOLOv5
+    def perform_object_detection(self, img):
+        results = model(img)  # Perform object detection using YOLOv5
+        # Convert detections to numpy array
+        detections = results.xyxy[0].cpu().numpy()
+
+        # Filter out detections for the "person" class
+        # Person class is class ID 0
+        person_detections = detections[detections[:, 5] == 0]
+
+        return person_detections
+
+    def load_annotations(self):
+        """
+        Parse annotation files that across all cameras to obtain frames(self).
+        Within data format:
+            [frame_id]: (top_left_x, top_left_y, width, height, track_id, camera_id)
+        """
+        for frame_id in trange(self.valid_frames_range[-1]):
+            for cam_id in range(self.num_of_cams):
+                path = os.path.join(
+                    self.base_dir, f'{self.dataset_name}/src', 'Image_subsets', f'C{cam_id+1}')
+                img_path = os.path.join(path, f'frame_{frame_id}.jpg')
+
+                # Check if image file exists
+                if os.path.isfile(img_path):
+                    img = cv2.imread(img_path)  # Read image from file
+
+                    # Perform object detection using YOLOv5
+                    detections = self.perform_object_detection(img)
+
+                    # Store the detection results in the dictionary format
+                    for detection in detections:
+                        initial_id = random.randint(1, 1000)
+                        x_min, y_min, x_max, y_max, confidence, class_id = detection
+                        x_min = max(x_min, 0)  # Prevent negative values
+                        y_min = max(y_min, 0)  # Prevent negative values
+                        width = x_max - x_min
+                        height = y_max - y_min
+                        self.frames.setdefault(frame_id, []).append(
+                            (int(x_min), int(y_min), int(
+                                width), int(height), initial_id, cam_id)
+                        )
+                else:
+                    print(f"Image not found: {img_path}")
+
+    def load_frames(self):
+        # Copy from original dataset
+        # 0000~1995 -> 0~400
+        if not os.path.exists(self.frames_output_path):
+            os.mkdir(self.frames_output_path)
+        for cam_id in range(self.num_of_cams):
+            path = os.path.join(
+                self.base_dir, f'{self.dataset_name}/src', 'Image_subsets', f'C{cam_id+1}')
+            for frame_id in trange(self.valid_frames_range[-1]):
+                img = cv2.imread(os.path.join(
+                    path, f'frame_{frame_id}.jpg'))
+                cv2.imwrite(os.path.join(self.frames_output_path,
+                                         f'{frame_id}_{cam_id}.{self.image_format}'), img)
 
 
 class CAMPUSPreprocess(BasePreprocess):
@@ -333,7 +395,7 @@ def parse_args():
 
 if __name__ == '__main__':
     DATASET_NAME = parse_args()
-    if DATASET_NAME not in ['Wildtrack', 'CAMPUS', 'PETS09', 'CityFlow']:
+    if DATASET_NAME not in ['Wildtrack', 'CAMPUS', 'PETS09', 'CityFlow','SelfDataset']:
         print('Please enter valid dataset.')
     else:
         print(f'Pre-processing {DATASET_NAME}...')
@@ -344,6 +406,9 @@ if __name__ == '__main__':
         elif DATASET_NAME == 'CityFlow':
             preprocess(f'./datasets/{DATASET_NAME}',
                        PreProcess=CityFlowPreprocess)
+        elif DATASET_NAME == 'SelfDataset':
+            preprocess(f'./datasets/{DATASET_NAME}',
+                       PreProcess=SelfDatasetPreprocess)
         else:  # CAMPUS, PETS09
             preprocess(f'./datasets/{DATASET_NAME}',
                        PreProcess=CAMPUSPreprocess)
